@@ -56,11 +56,12 @@ Scripts/aws/
 ## 安全须知
 
 1. 云资源脚本的默认 `INGRESS_CIDR=0.0.0.0/0` 会向整个互联网开放所有协议，只适合临时验证。正式使用前必须改成可信来源 CIDR，并在 AWS 安全组中只保留实际需要的端口和协议。
-2. `curl | bash` 会直接执行远程代码。长期使用时应将下载地址和 `AWS_ROUTE_REF` 固定到已审查的 Git commit，而不是一直跟随 `main`。
-3. 所有创建、安装、删除和重新生成节点等变更操作，通过 `quick-run.sh` 执行时都必须显式加 `--yes` 或设置 `AUTO_APPROVE=1`。
-4. 不要提交 PEM、密码、节点链接、凭据文件或生成后的 `ss://` 地址。本目录的 `.gitignore` 已排除常见敏感文件名，但仍应在提交前人工检查。
-5. AWS 资源会产生 EC2、EBS、Elastic IP、跨区域流量和 Local Zone 等费用。使用完成后应检查资源状态并执行对应删除命令。
-6. 删除脚本只清理带有本项目管理标签的资源，但仍应先运行 `status` 并确认账号、区域和目标名称。
+2. `curl | bash` 会直接执行远程代码。长期使用时应将 `AWS_ROUTE_REF` 固定到已审查的 Git commit，而不是一直跟随 `main`。
+3. 私有仓库访问令牌只需要目标仓库的 Contents 只读权限，不要使用具有写权限或无关仓库权限的令牌。入口脚本下载完成后会清除令牌，不会把令牌传给 AWS 或服务器部署脚本。
+4. 所有创建、安装、删除和重新生成节点等变更操作，通过 `quick-run.sh` 执行时都必须显式加 `--yes` 或设置 `AUTO_APPROVE=1`。
+5. 不要提交 PEM、密码、节点链接、凭据文件或生成后的 `ss://` 地址。本目录的 `.gitignore` 已排除常见敏感文件名，但仍应在提交前人工检查。
+6. AWS 资源会产生 EC2、EBS、Elastic IP、跨区域流量和 Local Zone 等费用。使用完成后应检查资源状态并执行对应删除命令。
+7. 删除脚本只清理带有本项目管理标签的资源，但仍应先运行 `status` 并确认账号、区域和目标名称。
 
 ## 前置条件
 
@@ -227,11 +228,37 @@ sudo ./deploy-landing-ss.sh show-credentials
 
 ## 方式二：curl | bash 一键执行
 
-统一入口：
+当前远程仓库是私有仓库，匿名访问 `raw.githubusercontent.com` 会返回 `404`。应使用 Fine-grained personal access token，并只授予 `pi-pi-cat/Xavier` 仓库的 Contents 只读权限。
+
+### 准备私有仓库读取
+
+在当前终端中隐藏输入令牌，并定义下载函数：
 
 ```bash
-RUN_URL=https://raw.githubusercontent.com/pi-pi-cat/Xavier/main/Scripts/aws/quick-run.sh
+read -rsp "GitHub read-only token: " AWS_ROUTE_GITHUB_TOKEN
+printf '\n'
+export AWS_ROUTE_GITHUB_TOKEN
+export AWS_ROUTE_REF=main
+
+AWS_ROUTE_CONTENT_API=https://api.github.com/repos/pi-pi-cat/Xavier/contents/Scripts/aws/quick-run.sh
+
+fetch_aws_route() {
+  curl -fsSL \
+    --proto '=https' \
+    --proto-redir '=https' \
+    --tlsv1.2 \
+    -H 'Accept: application/vnd.github.raw+json' \
+    -H "Authorization: Bearer $AWS_ROUTE_GITHUB_TOKEN" \
+    -H 'X-GitHub-Api-Version: 2026-03-10' \
+    --get \
+    --data-urlencode "ref=$AWS_ROUTE_REF" \
+    "$AWS_ROUTE_CONTENT_API"
+}
+
+fetch_aws_route | bash -s -- help
 ```
+
+`quick-run.sh` 会使用同一个只读令牌和 `AWS_ROUTE_REF` 下载所需的两个脚本。执行服务器组件时，它会先完成下载并清除令牌，再自动通过 `sudo` 运行部署脚本。
 
 ### 云资源命令
 
@@ -239,7 +266,7 @@ RUN_URL=https://raw.githubusercontent.com/pi-pi-cat/Xavier/main/Scripts/aws/quic
 
 ```bash
 PUBLIC_IP="$(curl -fsSL https://checkip.amazonaws.com)"
-curl -fsSL "$RUN_URL" | \
+fetch_aws_route | \
   env AWS_PROFILE=personal INGRESS_CIDR="${PUBLIC_IP}/32" \
   bash -s -- sg create --yes
 ```
@@ -247,8 +274,8 @@ curl -fsSL "$RUN_URL" | \
 查看或删除新加坡中转 EC2：
 
 ```bash
-curl -fsSL "$RUN_URL" | env AWS_PROFILE=personal bash -s -- sg status
-curl -fsSL "$RUN_URL" | env AWS_PROFILE=personal bash -s -- sg delete --yes
+fetch_aws_route | env AWS_PROFILE=personal bash -s -- sg status
+fetch_aws_route | env AWS_PROFILE=personal bash -s -- sg delete --yes
 ```
 
 创建、查看或删除目标落地节点：
@@ -256,15 +283,15 @@ curl -fsSL "$RUN_URL" | env AWS_PROFILE=personal bash -s -- sg delete --yes
 ```bash
 SOURCE_VPC_CIDR=172.31.0.0/16 # 替换为中转 EC2 所在 VPC 的 CIDR
 
-curl -fsSL "$RUN_URL" | \
+fetch_aws_route | \
   env AWS_PROFILE=personal INGRESS_CIDR="$SOURCE_VPC_CIDR" \
   bash -s -- edge create af-south-1 af-south-1-los-1a --yes
 
-curl -fsSL "$RUN_URL" | \
+fetch_aws_route | \
   env AWS_PROFILE=personal \
   bash -s -- edge status af-south-1 af-south-1-los-1a
 
-curl -fsSL "$RUN_URL" | \
+fetch_aws_route | \
   env AWS_PROFILE=personal \
   bash -s -- edge delete af-south-1 af-south-1-los-1a --yes
 ```
@@ -276,66 +303,87 @@ curl -fsSL "$RUN_URL" | \
 ```bash
 TRANSIT_PUBLIC_IP=203.0.113.10 # 替换为中转机公网 IP 或域名
 
-curl -fsSL "$RUN_URL" | \
-  sudo env NODE_ADDRESS="$TRANSIT_PUBLIC_IP" NODE_PORT=8388 NODE_NAME=Lagos-SS \
+fetch_aws_route | \
+  env NODE_ADDRESS="$TRANSIT_PUBLIC_IP" NODE_PORT=8388 NODE_NAME=Lagos-SS \
   bash -s -- landing install --yes
 ```
+
+入口脚本会在下载完成后自动调用 `sudo`。首次运行时，终端可能要求输入服务器的 sudo 密码。
 
 在中转机安装转发：
 
 ```bash
 LANDING_PRIVATE_IP=10.20.1.10 # 替换为落地机私网 IPv4
 
-curl -fsSL "$RUN_URL" | \
-  sudo env LANDING_PRIVATE_IP="$LANDING_PRIVATE_IP" FORWARD_PORT=8388 \
+fetch_aws_route | \
+  env LANDING_PRIVATE_IP="$LANDING_PRIVATE_IP" FORWARD_PORT=8388 \
   bash -s -- transit install --yes
 ```
 
 状态、凭据与节点重新生成：
 
 ```bash
-curl -fsSL "$RUN_URL" | sudo bash -s -- transit status
-curl -fsSL "$RUN_URL" | sudo bash -s -- landing status
-curl -fsSL "$RUN_URL" | sudo bash -s -- landing show-credentials
+fetch_aws_route | bash -s -- transit status
+fetch_aws_route | bash -s -- landing status
+fetch_aws_route | bash -s -- landing show-credentials
 
 TRANSIT_PUBLIC_IP=203.0.113.10 # 替换为新的中转机公网 IP 或域名
 
-curl -fsSL "$RUN_URL" | \
-  sudo env NODE_ADDRESS="$TRANSIT_PUBLIC_IP" NODE_PORT=8388 NODE_NAME=Lagos-SS \
+fetch_aws_route | \
+  env NODE_ADDRESS="$TRANSIT_PUBLIC_IP" NODE_PORT=8388 NODE_NAME=Lagos-SS \
   bash -s -- landing generate-node --yes
 ```
 
 移除服务器配置：
 
 ```bash
-curl -fsSL "$RUN_URL" | sudo bash -s -- transit remove --yes
-curl -fsSL "$RUN_URL" | sudo bash -s -- landing remove --yes
+fetch_aws_route | bash -s -- transit remove --yes
+fetch_aws_route | bash -s -- landing remove --yes
 ```
 
 移除操作会备份并删除脚本管理的配置与 systemd unit，但保留已安装的软件包。备份目录位于 `/var/backups/aws-route/`。
 
-## 固定到指定版本
-
-推荐用已经审查的 commit SHA 同时固定入口脚本和后续下载文件：
+使用完成后清除当前终端中的令牌：
 
 ```bash
-REF=0123456789abcdef0123456789abcdef01234567 # 替换为已审查的 commit SHA
-PINNED_URL="https://raw.githubusercontent.com/pi-pi-cat/Xavier/${REF}/Scripts/aws/quick-run.sh"
-
-curl -fsSL "$PINNED_URL" | \
-  env AWS_ROUTE_REF="$REF" AWS_PROFILE=personal \
-  bash -s -- sg status
+unset AWS_ROUTE_GITHUB_TOKEN
+unset -f fetch_aws_route
 ```
 
-`quick-run.sh` 默认从 `pi-pi-cat/Xavier` 的 `main` 分支下载脚本。可用以下变量覆盖：
+### 公开仓库或公开镜像
+
+如果以后将这些脚本发布到公开仓库，可以不使用令牌：
+
+```bash
+RUN_URL=https://raw.githubusercontent.com/pi-pi-cat/Xavier/main/Scripts/aws/quick-run.sh
+curl -fsSL "$RUN_URL" | bash -s -- help
+```
+
+当前私有仓库不能直接使用这条匿名 Raw 命令。
+
+## 固定到指定版本
+
+推荐把 `AWS_ROUTE_REF` 设置为已经审查的 commit SHA。下载函数和 `quick-run.sh` 会使用同一个 SHA：
+
+```bash
+export AWS_ROUTE_REF=0123456789abcdef0123456789abcdef01234567 # 替换为真实 SHA
+
+fetch_aws_route | env AWS_PROFILE=personal bash -s -- sg status
+```
+
+`quick-run.sh` 可用以下变量覆盖下载来源和执行方式：
 
 ```text
 AWS_ROUTE_REPOSITORY=owner/repository
 AWS_ROUTE_REF=branch-tag-or-commit
 AWS_ROUTE_RAW_BASE=https://example.com/path
+AWS_ROUTE_GITHUB_TOKEN=read-only-token
+AWS_ROUTE_GITHUB_API_BASE=https://api.github.com
+AWS_ROUTE_GITHUB_API_VERSION=2026-03-10
+AWS_ROUTE_USE_SUDO=auto
 ```
 
-自定义下载基地址必须使用 HTTPS。
+设置令牌时，入口使用 GitHub Contents API；未设置令牌时，入口使用 `AWS_ROUTE_RAW_BASE`。所有自定义下载地址必须使用 HTTPS。服务器组件默认在当前用户不是 root 时自动使用 `sudo`，可设置 `AWS_ROUTE_USE_SUDO=0` 禁用。
 
 ## 非交互自动化
 

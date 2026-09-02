@@ -6,6 +6,12 @@ AWS_ROUTE_REPOSITORY="${AWS_ROUTE_REPOSITORY:-pi-pi-cat/Xavier}"
 AWS_ROUTE_REF="${AWS_ROUTE_REF:-main}"
 AWS_ROUTE_SOURCE_DIR="${AWS_ROUTE_SOURCE_DIR:-}"
 AWS_ROUTE_RAW_BASE="${AWS_ROUTE_RAW_BASE:-https://raw.githubusercontent.com/${AWS_ROUTE_REPOSITORY}/${AWS_ROUTE_REF}/Scripts/aws}"
+AWS_ROUTE_GITHUB_TOKEN="${AWS_ROUTE_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"
+AWS_ROUTE_GITHUB_API_BASE="${AWS_ROUTE_GITHUB_API_BASE:-https://api.github.com}"
+AWS_ROUTE_GITHUB_API_VERSION="${AWS_ROUTE_GITHUB_API_VERSION:-2026-03-10}"
+AWS_ROUTE_CURL_BIN="${AWS_ROUTE_CURL_BIN:-curl}"
+AWS_ROUTE_USE_SUDO="${AWS_ROUTE_USE_SUDO:-auto}"
+AWS_ROUTE_SUDO_BIN="${AWS_ROUTE_SUDO_BIN:-sudo}"
 AWS_ROUTE_KEEP_TEMP="${AWS_ROUTE_KEEP_TEMP:-0}"
 
 WORK_DIR=""
@@ -23,7 +29,9 @@ Aliases:
   edge-node -> edge
 
 Mutating actions require --yes or AUTO_APPROVE=1 when launched through this
-bootstrap script. Set AWS_ROUTE_REF to a tag or commit SHA to pin downloads.
+bootstrap script. Private GitHub repositories require AWS_ROUTE_GITHUB_TOKEN.
+Set AWS_ROUTE_REF to a tag or commit SHA to pin downloads. Server components
+automatically use sudo when the current user is not root.
 EOF
 }
 
@@ -83,11 +91,19 @@ validate_source() {
   case "$AWS_ROUTE_REF" in
     ''|/*|*/|*..*|*[!A-Za-z0-9._/-]*) die "invalid AWS_ROUTE_REF" ;;
   esac
-  case "$AWS_ROUTE_RAW_BASE" in
-    https://*) ;;
-    *) die "AWS_ROUTE_RAW_BASE must use HTTPS" ;;
-  esac
-  command -v curl >/dev/null 2>&1 || die "curl is required"
+  command -v "$AWS_ROUTE_CURL_BIN" >/dev/null 2>&1 || die "$AWS_ROUTE_CURL_BIN is required"
+
+  if [ -n "$AWS_ROUTE_GITHUB_TOKEN" ]; then
+    case "$AWS_ROUTE_GITHUB_API_BASE" in
+      https://*) ;;
+      *) die "AWS_ROUTE_GITHUB_API_BASE must use HTTPS" ;;
+    esac
+  else
+    case "$AWS_ROUTE_RAW_BASE" in
+      https://*) ;;
+      *) die "AWS_ROUTE_RAW_BASE must use HTTPS" ;;
+    esac
+  fi
 }
 
 fetch_file() {
@@ -99,8 +115,23 @@ fetch_file() {
     [ -f "$AWS_ROUTE_SOURCE_DIR/$relative_path" ] || \
       die "source file not found: $AWS_ROUTE_SOURCE_DIR/$relative_path"
     cp "$AWS_ROUTE_SOURCE_DIR/$relative_path" "$destination"
+  elif [ -n "$AWS_ROUTE_GITHUB_TOKEN" ]; then
+    "$AWS_ROUTE_CURL_BIN" -fsSL \
+      --proto '=https' \
+      --proto-redir '=https' \
+      --tlsv1.2 \
+      --retry 3 \
+      --connect-timeout 10 \
+      --max-time 90 \
+      -H 'Accept: application/vnd.github.raw+json' \
+      -H "Authorization: Bearer $AWS_ROUTE_GITHUB_TOKEN" \
+      -H "X-GitHub-Api-Version: $AWS_ROUTE_GITHUB_API_VERSION" \
+      --get \
+      --data-urlencode "ref=$AWS_ROUTE_REF" \
+      "${AWS_ROUTE_GITHUB_API_BASE%/}/repos/${AWS_ROUTE_REPOSITORY}/contents/Scripts/aws/$relative_path" \
+      -o "$destination"
   else
-    curl -fsSL \
+    "$AWS_ROUTE_CURL_BIN" -fsSL \
       --proto '=https' \
       --proto-redir '=https' \
       --tlsv1.2 \
@@ -111,6 +142,37 @@ fetch_file() {
       -o "$destination"
   fi
   chmod 700 "$destination"
+}
+
+run_entry() {
+  local component="$1"
+  local action="$2"
+  local entry_path="$3"
+  shift 3
+  local name value
+  local sudo_environment=()
+
+  case "$component:$action:$AWS_ROUTE_USE_SUDO:$(id -u)" in
+    transit:help:*:*|landing:help:*:*|transit:*:0:*|transit:*:false:*|landing:*:0:*|landing:*:false:*|transit:*:*:0|landing:*:*:0)
+      "$entry_path" "$@"
+      return
+      ;;
+    transit:*:*:*|landing:*:*:*)
+      command -v "$AWS_ROUTE_SUDO_BIN" >/dev/null 2>&1 || \
+        die "$AWS_ROUTE_SUDO_BIN is required to run server components as root"
+      for name in \
+        AUTO_APPROVE INTERACTIVE NO_COLOR BACKUP_ROOT STATE_ROOT STATE_FILE \
+        CONFIG_DIR CONFIG_FILE CREDENTIALS_FILE NODE_FILE UNIT_FILE LISTEN_PORT \
+        SS_METHOD NODE_ADDRESS NODE_PORT NODE_NAME SING_BOX_BIN SING_BOX_VERSION \
+        SS_PASSWORD NFT_FILE APPLY_FILE SYSCTL_FILE LANDING_PRIVATE_IP FORWARD_PORT \
+        TRANSIT_INTERFACE TRANSIT_PRIVATE_IP; do
+        value="${!name-}"
+        [ -n "$value" ] && sudo_environment+=("$name=$value")
+      done
+      "$AWS_ROUTE_SUDO_BIN" env "${sudo_environment[@]}" "$entry_path" "$@"
+      ;;
+    *) "$entry_path" "$@" ;;
+  esac
 }
 
 run_component() {
@@ -149,6 +211,7 @@ run_component() {
   fetch_file "$common_path"
   fetch_file "$entry_path"
   bash -n "$WORK_DIR/$common_path" "$WORK_DIR/$entry_path"
+  unset AWS_ROUTE_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN
 
   if [ "$#" -eq 0 ]; then
     set -- help
@@ -157,7 +220,7 @@ run_component() {
     export INTERACTIVE="${INTERACTIVE:-0}"
   fi
 
-  "$WORK_DIR/$entry_path" "$@"
+  run_entry "$component" "$action" "$WORK_DIR/$entry_path" "$@"
 }
 
 component="${1:-help}"
