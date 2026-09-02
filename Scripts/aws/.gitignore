@@ -1,0 +1,7 @@
+.DS_Store
+*.pem
+*.key
+*.env
+route-node-links.txt
+*credentials*.txt
+*node-links*.txt
