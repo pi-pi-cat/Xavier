@@ -29,9 +29,9 @@ Aliases:
   edge-node -> edge
 
 Mutating actions require --yes or AUTO_APPROVE=1 when launched through this
-bootstrap script. Private GitHub repositories require AWS_ROUTE_GITHUB_TOKEN.
-Set AWS_ROUTE_REF to a tag or commit SHA to pin downloads. Server components
-automatically use sudo when the current user is not root.
+bootstrap script. The public repository works without a token; private forks
+may set AWS_ROUTE_GITHUB_TOKEN. Set AWS_ROUTE_REF to a tag or commit SHA to pin
+downloads. Server components automatically use sudo when needed.
 EOF
 }
 
